@@ -11,7 +11,7 @@ The repository is structured into folders and subfolders, each containing Jupyte
 ### Top-Level Directories
 - The top-level directories of this repository are organized according to the area of interest:
     - Main focus is the **GDS** (Geo Data Science) directory, it contains all my work done for my internship project;
-    - RL directory is secondary work on Reinforcement Learning, not updated and not important, maybe I'll go deeper in that one day
+    - RL directory is secondary work on Reinforcement Learning, **not updated and not important**, maybe I'll go deeper in that one day
 
 ### Subdirectories:
 1. **`GDS/CR`**:
@@ -20,10 +20,13 @@ The repository is structured into folders and subfolders, each containing Jupyte
        - `CR.ipynb`: First weeks work, focused on processing and dealing with Geospatial Data, experiments and trials regard shortest routes and traffic simulation, at the end there is pre-processing useful for the following notebooks.
        - `CR-2.ipynb`: Probabbly main corpus of the work, implementation of Graphs ML models such as GAT and different Graph Transformers of various nature and comparisons.
        - `Attention.ipynb`: Extraction, processing and interpretation of the different kinds of attention that can be extracted from the different models.
+       - `model_testing.ipynb`: Training different hybrid models, with high accuracy as unique goal on multiple cities datasets, then comparing how generalization with/without finetuning is.
 2. **`GDS/Urbanity`**:
    - This folder contains notebooks that use datasets created with [Urbanity](https://urbanity.readthedocs.io/en/latest/).
    - **Notebook**:
      - `GAT_urbanity.ipynb`: Basic implementation of GAT based model following [Urbanity tutorial](https://urbanity.readthedocs.io/en/latest/notebooks/transductive_graph_ml.html)
      - `Paris_greenview.ipynb`: In this notebook the work done in the [GDS/CR](#Subdirectories) is reproduced with a way bigger dataset of Paris and node-level predictions.
-
+     - `Parish3.ipynb`: Repeating the most of the work of the above notebook but on hexed data of paris.
+     - `AttGraphParis.ipynb`: Extending the Attention Graph analysis of graph transformers of https://arxiv.org/pdf/2502.12352 to Hybrid model and studying differences in the weights distribution between models trained on feature rich data, compared to models trained on only spatial features (x,y)
+     - `AttDistributions.ipynb`: investigation on multimodality shown by models trained only on spatial features
 ---
