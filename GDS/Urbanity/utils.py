@@ -1,16 +1,18 @@
 from matplotlib import pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
+import pandas as pd
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import torch
 import geopandas as gpd
 from shapely.geometry import LineString
 from torch_geometric.data import Data
 import numpy as np
 import seaborn as sns
+import torch_geometric.transforms as T
 
 
 
-
-def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,criterion , branch = None):
+def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,criterion , target = 'Green View' ,branch = None):
     if branch is None:
         model.load_state_dict(torch.load(path))
     if branch is not None:
@@ -33,7 +35,7 @@ def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,crit
 # Visualize results
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 # Actual Green View Index
-    h3_nodes.plot(column='Green View', cmap='Greens', markersize=2,
+    h3_nodes.plot(column= target, cmap='Greens', markersize=2,
                      legend=True, ax=ax1, legend_kwds={'label': "Green View Index"})
     ax1.set_title('Actual Green View Index')
     ax1.set_axis_off()
@@ -454,3 +456,246 @@ def analyze_attention_weight_distributions(model, data, num_layers=4):
     plt.show()
 
     return attn_df
+
+
+
+def create_spatial_finetune_mask(node_data, edge_index, percentage=0.05, type = 'edge' ,seed=0):
+    """
+    Create a fine-tuning mask using nearest neighbors to sample nodes uniformly in space.
+    
+    Args:
+        node_data: DataFrame with node data containing 'x' and 'y' coordinates
+        edge_index: PyTorch tensor with edge indices
+        percentage: Percentage of nodes to sample for fine-tuning
+        type: Type of mask to return ('node' or 'edge')
+        seed: Random seed for reproducibility
+        
+    Returns:
+        node_mask: Boolean mask for sampled nodes
+        edge_mask: Boolean mask for edges connected to sampled nodes
+    """
+    np.random.seed(seed)
+    
+    # Extract spatial coordinates
+    x_coords = node_data['x'].values
+    y_coords = node_data['y'].values
+    coordinates = np.column_stack([x_coords, y_coords])
+    
+    # Determine spatial bounds
+    x_min, x_max = np.min(x_coords), np.max(x_coords)
+    y_min, y_max = np.min(y_coords), np.max(y_coords)
+    
+    # Calculate number of points to sample
+    num_nodes = len(node_data)
+    num_points_to_sample = int(percentage * num_nodes)
+    
+    # Generate random points uniformly across the space
+    random_points = np.column_stack([
+        np.random.uniform(x_min, x_max, num_points_to_sample),
+        np.random.uniform(y_min, y_max, num_points_to_sample)
+    ])
+    
+    # Find nearest nodes to each random point
+    nn = NearestNeighbors(n_neighbors=1).fit(coordinates)
+    distances, indices = nn.kneighbors(random_points)
+    
+    # Get unique nearest nodes (may be fewer than random points if multiple points map to same node)
+    selected_node_indices = np.unique(indices.flatten())
+    
+    # Create node mask
+    node_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    node_mask[selected_node_indices] = True
+    
+    # Create edge mask - include edges that connect to selected nodes
+    sources, targets = edge_index
+    edge_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+    
+    for i, (src, dst) in enumerate(zip(sources, targets)):
+        if node_mask[src] or node_mask[dst]:
+            edge_mask[i] = True
+            
+    if type == 'node':
+        return node_mask
+    elif type == 'edge':
+        return edge_mask
+
+
+
+def create_region_finetune_mask(node_data, edge_index, type = 'edge' ,region_params=None, seed=0):
+    """
+    Create a fine-tuning mask for nodes in a specific region of the city.
+    
+    Args:
+        node_data: DataFrame with node data containing 'x' and 'y' coordinates
+        edge_index: PyTorch tensor with edge indices
+        region_params: Parameters for the region (quadrant): 'NE', 'NW', 'SE', 'SW', 'N', 'S', 'E', 'W', 'C'
+        type: Type of mask to return ('node' or 'edge')
+        seed: Random seed for reproducibility
+        
+    Returns:
+        node_mask: Boolean mask for nodes in the specified region
+        edge_mask: Boolean mask for edges connected to nodes in the region
+
+    """
+    
+    # Extract spatial coordinates
+    x_coords = node_data['x'].values
+    y_coords = node_data['y'].values
+    
+    # Determine spatial bounds of the entire city
+    x_min, x_max = np.min(x_coords), np.max(x_coords)
+    y_min, y_max = np.min(y_coords), np.max(y_coords)
+    
+    if region_params is None:
+        region_params = 'SW'  # Default to southwest quadrant
+    
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    
+    if region_params == 'NE':
+        node_mask = (x_coords >= x_center) & (y_coords >= y_center)
+    elif region_params == 'NW':
+        node_mask = (x_coords <= x_center) & (y_coords >= y_center)
+    elif region_params == 'SE':
+        node_mask = (x_coords >= x_center) & (y_coords <= y_center)
+    elif region_params == 'SW':
+        node_mask = (x_coords <= x_center) & (y_coords <= y_center)
+    elif region_params == 'N':
+        node_mask = (y_coords >= y_center)
+    elif region_params == 'S':
+        node_mask = (y_coords <= y_center)
+    elif region_params == 'E':
+        node_mask = (x_coords >= x_center)
+    elif region_params == 'W':
+        node_mask = (x_coords <= x_center)
+    elif region_params == 'C':
+        radius = min(x_max - x_min, y_max - y_min) / 6
+        node_mask = ((x_coords - x_center) ** 2 + (y_coords - y_center) ** 2) <= radius ** 2
+    else:
+        raise ValueError(f"Invalid quadrant: {region_params}")
+    
+    # Convert NumPy boolean array to PyTorch tensor
+    node_mask = torch.tensor(node_mask, dtype=torch.bool)
+    
+    # Create edge mask - include edges that connect to selected nodes
+    sources, targets = edge_index
+    edge_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
+    
+    for i, (src, dst) in enumerate(zip(sources, targets)):
+        if node_mask[src] or node_mask[dst]:
+            edge_mask[i] = True
+            
+    if type == 'node':
+        return node_mask
+    elif type == 'edge':
+        return edge_mask
+    
+def create_h3_aggregated_graph(amsterdam_nodes, agg_dict, h3_resolution=9):
+    # Convert to H3 and get boundaries
+    dfh3 = amsterdam_nodes.h3.geo_to_h3(h3_resolution)
+    dfh3 = dfh3.h3.h3_to_geo_boundary()
+    
+    # Aggregate features by H3 cell
+    h3_grouped = dfh3.groupby([f'h3_0{h3_resolution}']).agg(agg_dict).reset_index()
+    h3_grouped.set_index(f'h3_0{h3_resolution}', inplace=True)
+    
+    # Get geometry for each H3 cell
+    h3_nodes_amst = h3_grouped.h3.h3_to_geo_boundary()
+    h3_nodes_amst = gpd.GeoDataFrame(
+        h3_grouped, geometry=h3_nodes_amst['geometry'], crs=amsterdam_nodes.crs
+    )
+    h3_nodes_amst['x'] = h3_nodes_amst.geometry.centroid.x
+    h3_nodes_amst['y'] = h3_nodes_amst.geometry.centroid.y
+
+    # Find neighbors for each H3 cell
+    neighbors_index = h3_nodes_amst.h3.k_ring(1, explode=True)
+    neighbors_index = neighbors_index[neighbors_index['h3_k_ring'] != neighbors_index.index]
+    neighbors_index = neighbors_index['h3_k_ring']
+    neighbor_df = neighbors_index.reset_index()
+    neighbor_pairs = set((row['index'], row['h3_k_ring']) for _, row in neighbor_df.iterrows())
+
+    # Ensure symmetry (optional, can be omitted if not needed)
+    symmetric = all((b, a) in neighbor_pairs for a, b in neighbor_pairs)
+    if not symmetric:
+        missing_pairs = [(b, a) for a, b in neighbor_pairs if (b, a) not in neighbor_pairs]
+        # Remove pairs where the first cell is not present in h3_nodes_amst
+        missing_pairs = [(cell, neighbor) for cell, neighbor in missing_pairs if h3_nodes_amst[h3_nodes_amst.index == cell].empty]
+        neighbors_index = neighbors_index[~neighbors_index.isin([cell for cell, _ in missing_pairs])]
+        # Rebuild neighbor_pairs
+        neighbor_df = neighbors_index.reset_index()
+        neighbor_pairs = set((row['index'], row['h3_k_ring']) for _, row in neighbor_df.iterrows())
+
+    # Build edges GeoDataFrame
+    h3_edges_amst = pd.DataFrame(neighbor_pairs, columns=['source', 'target'])
+    h3_edges_amst['geometry'] = h3_edges_amst.apply(
+        lambda row: LineString([
+            h3_nodes_amst.loc[row['source'], 'geometry'].centroid,
+            h3_nodes_amst.loc[row['target'], 'geometry'].centroid
+        ]), axis=1
+    )
+    h3_edges_amst = gpd.GeoDataFrame(h3_edges_amst, geometry='geometry', crs=amsterdam_nodes.crs)
+    h3_edges_amst = h3_edges_amst[['source', 'target', 'geometry']]
+    h3_edges_amst.reset_index(drop=True, inplace=True)
+    h3_nodes_amst['Green View'] = h3_nodes_amst['Green View Mean']
+
+    return h3_nodes_amst, h3_edges_amst
+
+def preprocess_data(nodes, edges, X_list = ['x', 'y', 'PopSum'], target = 'Green View Mean', map_type = 'h3'):
+    """
+    Preprocess the data for training a GNN model.
+    Args:
+        nodes: DataFrame containing node features
+        edges: DataFrame containing edge information
+        X_list: List of feature columns to use for node features
+        target: Target variable for regression
+        map_type: Type of mapping for edges ('h3' or 'geo')
+    Returns:
+        data: PyTorch Geometric Data object containing processed node features, edge indices, and target variable
+    """
+    device = 'cpu'
+    y = nodes[target].values
+    X = nodes[X_list].values
+    X = np.array(X)
+    scaler =  StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    node_mapping = {node_id: idx for idx, node_id in enumerate(nodes.index)}
+    if map_type == 'h3':
+        edge_index = []
+        for _, row in edges.iterrows():
+            source_idx = node_mapping[row['source']]
+            target_idx = node_mapping[row['target']]
+            edge_index.append([source_idx, target_idx]) # no need to add the reverse edge since edge already contains it
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+    elif map_type == 'geo':
+        node_to_id = {}
+        for i, node in enumerate(nodes['osmid'].values):
+            node_to_id[node] = i
+
+        start_node = [node_to_id[i] for i in edges['u'].values]
+        end_node = [node_to_id[i] for i in edges['v'].values]
+        start = torch.tensor(start_node, dtype=torch.long)
+        end = torch.tensor(end_node, dtype=torch.long)
+        edge_index = torch.stack([start, end], dim=0)
+    transform = T.AddRandomWalkPE( 20, attr_name= 'pe')
+    data = Data(x = torch.FloatTensor(X_scaled), y = torch.FloatTensor(y), edge_index = edge_index )
+    data = transform(data)
+    np.random.seed(0)
+    n_nodes = data.num_nodes
+    indices = np.random.permutation(n_nodes)
+    train_idx = indices[:int(0.7 * n_nodes)]
+    val_idx = indices[int(0.7 * n_nodes):int(0.85 * n_nodes)]
+    test_idx = indices[int(0.85 * n_nodes):]
+    train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+    val_mask = torch.zeros(n_nodes, dtype=torch.bool)
+    test_mask = torch.zeros(n_nodes, dtype=torch.bool)
+    train_mask[train_idx] = True
+    val_mask[val_idx] = True
+    test_mask[test_idx] = True        
+    data.train_mask = train_mask   
+    data.val_mask = val_mask
+    data.test_mask = test_mask
+    data.to(device)
+
+
+        
+    return data
