@@ -1,3 +1,4 @@
+import os
 from matplotlib import pyplot as plt
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
@@ -6,15 +7,33 @@ import torch
 import geopandas as gpd
 from shapely.geometry import LineString
 from torch_geometric.data import Data
+import torch.nn as nn
 import numpy as np
 import seaborn as sns
 import torch_geometric.transforms as T
+from torch_geometric.loader import DataLoader
+from models import *
 
 
 
-def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,criterion , target = 'Green View' ,branch = None):
+def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,criterion , target = 'Green View' ,branch = None, load = True):
+    """ Evaluates the model on the test set and visualizes the predictions.
+    Args:
+        model: The trained model to evaluate.
+        CompleteData: The graph data object containing node features, edge indices, and masks.
+        path: Path to the saved model weights.
+        h3_nodes: GeoDataFrame containing node geometries and features.
+        criterion: Loss function to evaluate the model.
+        target: The target variable to visualize.
+        branch: Optional branch to evaluate if the model supports hybrid branches.
+
+    Returns:
+        fig: Matplotlib figure containing the visualizations of actual and predicted target.
+    """
     if branch is None:
-        model.load_state_dict(torch.load(path))
+        if load:
+            print(f'Loading model from {path}')
+            model.load_state_dict(torch.load(path))
     if branch is not None:
         test_loss = evaluate_hybrid(model, CompleteData, CompleteData.test_mask, criterion ,branch )
     else:
@@ -36,17 +55,73 @@ def evaluate_and_visualize_predictions(model, CompleteData, path, h3_nodes ,crit
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 # Actual Green View Index
     h3_nodes.plot(column= target, cmap='Greens', markersize=2,
-                     legend=True, ax=ax1, legend_kwds={'label': "Green View Index"})
-    ax1.set_title('Actual Green View Index')
+                     legend=True, ax=ax1, legend_kwds={'label': target})
+    ax1.set_title(f'Actual {target}')
     ax1.set_axis_off()
 # Predicted Green View Index
     h3_nodes.plot(column='predicted_green_view_performer', cmap='Greens', markersize=2,
-                     legend=True, ax=ax2, legend_kwds={'label': "Predicted Green View Index"})
-    ax2.set_title('Predicted Green View Index')
+                     legend=True, ax=ax2, legend_kwds={'label': f"Predicted {target}"})
+    ax2.set_title(f'Predicted {target}')
     ax2.set_axis_off()
+    plt.suptitle(f'Final Test Loss: {test_loss:.4f}', fontsize=16)
     plt.tight_layout()
-    plt.show()
     h3_nodes.drop(columns=['predicted_green_view_performer'], inplace=True)
+    plt.close(fig)  # Close the figure to avoid display in Jupyter notebooks
+    # return the plot
+    return fig
+
+
+
+def plot_combined_results(model_name, features, city_list, save_path=None,figures_dir='figures'):
+    """
+    Loads individual city plot images for a given model and feature set,
+    stacks them vertically, and displays them as a single figure.
+
+    Args:
+        model_name (str): The name of the model (e.g., 'GATv2', 'Hybrid').
+        features (list): A list of feature names used for training.
+        city_list (list): A list of city names to include in the plot.
+        figures_dir (str): The directory where the individual plot images are saved.
+    """
+    feature_string = '_'.join(features).replace(' ', '')
+    
+    image_arrays = []
+    print(f"Loading images for model '{model_name}' with features '{feature_string}'...")
+
+    # Load the saved figures for each city into a list
+    for city in city_list:
+        filepath = os.path.join(figures_dir, f'{model_name}_{feature_string}_{city}.png')
+        try:
+            # Read the image file into a numpy array
+            img_data = plt.imread(filepath)
+            image_arrays.append(img_data)
+        except FileNotFoundError:
+            print(f"Warning: Could not find file {filepath}")
+
+    # If we successfully loaded images, stack and display them
+    if image_arrays:
+        # Vertically stack the numpy arrays of the images
+        stacked_image = np.vstack(image_arrays)
+        # Display the final combined image
+        # Adjust figsize height based on the number of images
+        fig_height = 4 * len(image_arrays)
+        plt.figure(figsize=(10, fig_height))
+    
+        plt.imshow(stacked_image)
+        plt.axis('off')
+        plt.title(f'Results for {model_name} | Features: {feature_string}', pad=20)
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight')
+        plt.show()
+
+        
+    else:
+        print("No images were found to display for the specified model and features.")
+        return None
+        
+    return stacked_image
+
+
 
 
     
@@ -189,6 +264,7 @@ def analyze_head_correlations_within_layer(model, data, model_type, layer_idx=0 
     Args:
         model: The trained model
         data: The graph data object
+        model_type: Type of model ("GATv2" or "Performer")
         layer_idx: Index of the layer to analyze
         visualize: Whether to create visualizations
         
@@ -653,6 +729,11 @@ def preprocess_data(nodes, edges, X_list = ['x', 'y', 'PopSum'], target = 'Green
         data: PyTorch Geometric Data object containing processed node features, edge indices, and target variable
     """
     device = 'cpu'
+    if 'POI' in X_list:
+        poi_cols = ['Civic', 'Commercial','Entertainment', 'Food', 'Healthcare', 'Institutional', 'Recreational', 'Social']
+        nodes['POI'] = nodes[poi_cols].sum(axis=1)
+        nodes.fillna(0, inplace=True)
+
     y = nodes[target].values
     X = nodes[X_list].values
     X = np.array(X)
@@ -699,3 +780,122 @@ def preprocess_data(nodes, edges, X_list = ['x', 'y', 'PopSum'], target = 'Green
 
         
     return data
+
+
+def train_batched_model(model, loader, epochs, lr, device = 'cpu', save_path = None, patience=100, model_type = 'Performer', verbose=True):
+    """
+    Trains a PyTorch Geometric model using a DataLoader for batched graph data.
+
+    Args:
+        model (nn.Module): The model to train.
+        loader (DataLoader): The DataLoader for training and validation.
+        epochs (int): The maximum number of training epochs.
+        lr (float): The learning rate for the optimizer.
+        device (str): The device to use for training (e.g., 'cpu' or 'cuda').
+        save_path (str): The file path to save the best performing model.
+        patience (int): The number of epochs to wait for improvement before early stopping.
+        model_type (str): The type of model being trained ('Performer', 'GATv2', or 'Hybrid').
+        verbose (bool): Whether to print training progress and metrics.
+
+    Returns:
+        tuple: A tuple containing:
+            - model (nn.Module): The trained model with the best weights loaded.
+            - train_losses (list): A list of training losses for each epoch.
+            - val_losses (list): A list of validation losses for each epoch.
+    """
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Adjust scheduler patience based on early stopping patience
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=patience // 2.5)
+    
+    best_loss = float('inf')
+    early_stop_counter = 0
+    train_losses, val_losses = [], []
+    if verbose:
+        print(f"Starting training on {device}...")
+
+    for epoch in range(1, epochs + 1):
+        epoch_train_loss = 0
+        epoch_val_loss = 0
+
+        for batch in loader:
+            batch = batch.to(device)
+            if model_type == 'Performer' or model_type == 'Hybrid':
+                loss = train_performer(model, batch, optimizer, criterion, epoch)
+            if model_type == 'GATv2':
+                loss = train(model, batch, optimizer, criterion)
+            epoch_train_loss += loss  
+        
+        # Validation
+        for batch in loader:
+            batch = batch.to(device)
+            loss = evaluate(model, batch, batch.val_mask, criterion)
+            epoch_val_loss += loss
+
+        epoch_train_loss /= len(loader)
+        train_losses.append(epoch_train_loss)
+        epoch_val_loss /= len(loader)
+        val_losses.append(epoch_val_loss)
+
+        scheduler.step(epoch_val_loss)
+
+        if epoch_val_loss < best_loss:
+            best_loss = epoch_val_loss
+            if save_path is not None:
+                torch.save(model.state_dict(), save_path)
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+
+        if verbose:
+            if epoch % 10 == 0:
+                test_loss = 0
+                for batch in loader:
+                    batch = batch.to(device)
+                    loss = evaluate(model, batch, batch.test_mask, criterion)
+                    test_loss += loss
+                test_loss /= len(loader)
+
+                print(f'Epoch: {epoch:03d}, Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}, '
+                    f'Test Loss: {test_loss:.4f}, Counter: {early_stop_counter}')
+
+        if early_stop_counter >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+            
+    # Load the best model weights before returning
+    if save_path is not None:
+        model.load_state_dict(torch.load(save_path))
+        if verbose:
+            print(f"Finished training. Best model with validation loss {best_loss:.4f} loaded from {save_path}.")
+    
+    return model, train_losses, val_losses
+
+
+def finetune(model, data, ft_mask, optimizer, criterion):
+    """ Finetunes the model on a subset of edges defined by ft_mask.
+    Args:
+        model: The trained model to finetune.
+        data: The graph data object containing node features, edge indices, and target variable.
+        ft_mask: Boolean mask indicating which edges to use for finetuning.
+        optimizer: Optimizer for updating model parameters.
+        criterion: Loss function to compute the loss during finetuning.
+    Returns:
+        loss: The computed loss for the finetuning step.
+    """
+    model.train()
+    optimizer.zero_grad()
+    
+    # Forward pass on full graph
+    out = model(data.x, data.pe, data.edge_index)
+    predictions = out.squeeze(-1)
+    
+    # Loss only on masked edges
+    loss = criterion(predictions[ft_mask], data.y[ft_mask])
+    loss.backward()
+    optimizer.step()
+    
+    return loss.item()
+
+
+
